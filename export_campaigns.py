@@ -26,7 +26,7 @@ except ImportError:
     REVISION = "2024-10-15"
     MONTHS_BACK = 6
     OUTPUT_FILENAME = "klaviyo_campaigns_export.csv"
-    RATE_LIMIT_DELAY = 0.2
+    RATE_LIMIT_DELAY = 0.5
 
 # Headers for API requests
 HEADERS = {
@@ -52,8 +52,7 @@ def get_campaigns_with_messages() -> List[Dict]:
     # Filter for email campaigns and include campaign messages
     params = {
         "filter": "equals(messages.channel,'email')",
-        "include": "campaign-messages",
-        "page[size]": 100  # Fetch up to 100 campaigns per page
+        "include": "campaign-messages"
     }
     
     while url:
@@ -134,14 +133,14 @@ def get_campaigns_with_messages() -> List[Dict]:
     return filtered_campaigns
 
 
-def get_campaign_stats(campaign_id: str, campaign_name: str) -> Dict:
+def get_campaign_stats(campaign_id: str, campaign_name: str, retry_count: int = 0) -> Dict:
     """
     Fetch performance statistics for a specific campaign.
     """
     print(f"Fetching stats for: {campaign_name}")
-    
+
     url = f"{BASE_URL}/campaign-values-reports/"
-    
+
     # We need a conversion metric ID - using a placeholder
     # You may need to fetch a real metric ID or this might work with any ID
     payload = {
@@ -167,9 +166,30 @@ def get_campaign_stats(campaign_id: str, campaign_name: str) -> Dict:
             }
         }
     }
-    
+
     response = requests.post(url, headers=HEADERS, json=payload)
-    
+
+    # Handle rate limiting with exponential backoff
+    if response.status_code == 429:
+        if retry_count < 3:
+            wait_time = (retry_count + 1) * 2  # 2, 4, 6 seconds
+            print(f"  Rate limited. Waiting {wait_time} seconds before retry...")
+            time.sleep(wait_time)
+            return get_campaign_stats(campaign_id, campaign_name, retry_count + 1)
+        else:
+            print(f"  Warning: Rate limit exceeded after 3 retries")
+            return {
+                "recipients": 0,
+                "opens": 0,
+                "opens_unique": 0,
+                "clicks": 0,
+                "clicks_unique": 0,
+                "open_rate": 0,
+                "click_rate": 0,
+                "bounced": 0,
+                "delivered": 0
+            }
+
     if response.status_code != 200:
         print(f"  Warning: Could not fetch stats (status {response.status_code})")
         return {
@@ -305,10 +325,11 @@ def main():
     
     # Step 2: Get performance stats for each campaign
     print(f"\nFetching performance stats for {len(campaigns)} campaigns...")
-    print("(This may take a minute...)")
+    print("(This may take several minutes due to rate limiting...)")
     print()
-    
-    for campaign in campaigns:
+
+    for i, campaign in enumerate(campaigns, 1):
+        print(f"[{i}/{len(campaigns)}] ", end="")
         stats = get_campaign_stats(campaign["campaign_id"], campaign["campaign_name"])
         campaign.update(stats)
         time.sleep(RATE_LIMIT_DELAY)  # Rate limiting

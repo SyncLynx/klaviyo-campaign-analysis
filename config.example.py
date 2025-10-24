@@ -22,4 +22,4 @@ MONTHS_BACK = 6  # How many months of campaigns to export
 OUTPUT_FILENAME = "klaviyo_campaigns_export.csv"
 
 # Rate Limiting
-RATE_LIMIT_DELAY = 0.2  # Delay between API calls in seconds (Klaviyo allows 5 req/sec)
+RATE_LIMIT_DELAY = 0.5  # Delay between API calls in seconds (conservative to avoid 429 errors)
