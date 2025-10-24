@@ -152,13 +152,18 @@ def get_campaigns_with_messages() -> List[Dict]:
             params = None  # Don't send params for next page URL
             time.sleep(0.1)  # Rate limiting courtesy
     
-    # Filter to only campaigns from last X months
-    print(f"Filtering for campaigns sent after: {months_ago.strftime('%Y-%m-%d %H:%M:%S')}")
+    # Filter to only campaigns from last X months with "sent" status
+    print(f"Filtering for SENT campaigns after: {months_ago.strftime('%Y-%m-%d %H:%M:%S')}")
     filtered_campaigns = []
     no_date_count = 0
     parse_error_count = 0
+    non_sent_count = 0
 
     for campaign in campaigns_data:
+        # Skip non-sent campaigns (drafts, scheduled, etc.)
+        if campaign.get("status") != "Sent":
+            non_sent_count += 1
+            continue
         if campaign.get("send_time"):
             try:
                 send_date = datetime.fromisoformat(campaign["send_time"].replace("Z", "+00:00"))
@@ -180,6 +185,8 @@ def get_campaigns_with_messages() -> List[Dict]:
         else:
             no_date_count += 1
 
+    if non_sent_count > 0:
+        print(f"Skipped {non_sent_count} campaigns with non-Sent status (drafts, scheduled, etc.)")
     if parse_error_count > 0:
         print(f"Skipped {parse_error_count} campaigns due to date parsing errors")
     if no_date_count > 0:
