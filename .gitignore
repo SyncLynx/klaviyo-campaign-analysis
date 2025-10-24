@@ -1,5 +1,6 @@
 # Klaviyo API Configuration
 config.py
+klaviyo_campaigns_export.csv
 
 # Python
 __pycache__/

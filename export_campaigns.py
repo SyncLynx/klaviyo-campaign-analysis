@@ -26,7 +26,7 @@ except ImportError:
     REVISION = "2024-10-15"
     MONTHS_BACK = 6
     OUTPUT_FILENAME = "klaviyo_campaigns_export.csv"
-    RATE_LIMIT_DELAY = 0.5
+    RATE_LIMIT_DELAY = 30.0  # 30 second between requests
 
 # Headers for API requests
 HEADERS = {
@@ -36,15 +36,58 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+# Cache for metric ID (to avoid repeated API calls)
+_METRIC_ID_CACHE = None
+
+
+def get_metric_id() -> str:
+    """
+    Fetch a valid metric ID from Klaviyo.
+    Uses the first available metric (typically "Placed Order" or similar).
+    Results are cached to avoid repeated API calls.
+    """
+    global _METRIC_ID_CACHE
+
+    if _METRIC_ID_CACHE:
+        return _METRIC_ID_CACHE
+
+    print("Fetching metric ID from Klaviyo...")
+    url = f"{BASE_URL}/metrics/"
+
+    # Don't use page[size] - Klaviyo doesn't support it for metrics endpoint
+    response = requests.get(url, headers=HEADERS)
+
+    if response.status_code != 200:
+        print(f"Warning: Could not fetch metrics (status {response.status_code})")
+        try:
+            error_detail = response.json()
+            print(f"Error details: {error_detail}")
+        except:
+            print(f"Response text: {response.text[:200]}")
+        print("Using PLACEHOLDER - some statistics may not be available")
+        return "PLACEHOLDER"
+
+    data = response.json()
+    metrics = data.get("data", [])
+
+    if metrics:
+        _METRIC_ID_CACHE = metrics[0]["id"]
+        print(f"Using metric: {metrics[0].get('attributes', {}).get('name', 'Unknown')} (ID: {_METRIC_ID_CACHE})")
+        return _METRIC_ID_CACHE
+
+    print("Warning: No metrics found. Using PLACEHOLDER")
+    return "PLACEHOLDER"
+
 
 def get_campaigns_with_messages() -> List[Dict]:
     """
     Fetch all email campaigns from the last X months with their message details.
     """
     print(f"Fetching campaigns from the last {MONTHS_BACK} months...")
-    
-    # Calculate date X months ago
-    months_ago = datetime.now() - timedelta(days=30 * MONTHS_BACK)
+
+    # Calculate date X months ago (make it timezone-aware to match Klaviyo's dates)
+    from datetime import timezone
+    months_ago = datetime.now(timezone.utc) - timedelta(days=30 * MONTHS_BACK)
     
     campaigns_data = []
     url = f"{BASE_URL}/campaigns/"
@@ -110,45 +153,59 @@ def get_campaigns_with_messages() -> List[Dict]:
             time.sleep(0.1)  # Rate limiting courtesy
     
     # Filter to only campaigns from last X months
+    print(f"Filtering for campaigns sent after: {months_ago.strftime('%Y-%m-%d %H:%M:%S')}")
     filtered_campaigns = []
+    no_date_count = 0
+    parse_error_count = 0
+
     for campaign in campaigns_data:
         if campaign.get("send_time"):
             try:
                 send_date = datetime.fromisoformat(campaign["send_time"].replace("Z", "+00:00"))
                 if send_date >= months_ago:
                     filtered_campaigns.append(campaign)
-            except:
-                # If we can't parse the date, include it anyway
-                filtered_campaigns.append(campaign)
+            except Exception as e:
+                # If we can't parse the date, skip it (don't include)
+                parse_error_count += 1
+                print(f"  Warning: Could not parse send_time for campaign {campaign.get('campaign_name')}: {e}")
         elif campaign.get("created_at"):
             # Fall back to created_at if send_time not available
             try:
                 created_date = datetime.fromisoformat(campaign["created_at"].replace("Z", "+00:00"))
                 if created_date >= months_ago:
                     filtered_campaigns.append(campaign)
-            except:
-                filtered_campaigns.append(campaign)
+            except Exception as e:
+                parse_error_count += 1
+                print(f"  Warning: Could not parse created_at for campaign {campaign.get('campaign_name')}: {e}")
+        else:
+            no_date_count += 1
+
+    if parse_error_count > 0:
+        print(f"Skipped {parse_error_count} campaigns due to date parsing errors")
+    if no_date_count > 0:
+        print(f"Skipped {no_date_count} campaigns with no send_time or created_at")
     
-    print(f"Found {len(filtered_campaigns)} campaigns from the last {MONTHS_BACK} months")
+    print(f"Total fetched: {len(campaigns_data)} | After filtering: {len(filtered_campaigns)} campaigns from the last {MONTHS_BACK} months")
+    if len(campaigns_data) > len(filtered_campaigns):
+        print(f"Filtered out {len(campaigns_data) - len(filtered_campaigns)} campaigns outside the date range")
     return filtered_campaigns
 
 
-def get_campaign_stats(campaign_id: str, campaign_name: str, retry_count: int = 0) -> Dict:
+def get_campaign_stats(campaign_id: str, campaign_name: str, metric_id: str, retry_count: int = 0) -> Dict:
     """
     Fetch performance statistics for a specific campaign.
+    Requires a valid metric_id from Klaviyo (fetched via get_metric_id()).
     """
     print(f"Fetching stats for: {campaign_name}")
 
     url = f"{BASE_URL}/campaign-values-reports/"
 
-    # We need a conversion metric ID - using a placeholder
-    # You may need to fetch a real metric ID or this might work with any ID
     payload = {
         "data": {
             "type": "campaign-values-report",
             "attributes": {
                 "timeframe": {
-                    "key": "last_6_months"
+                    "key": "last_7_days"
                 },
                 "filter": f'equals(campaign_id,"{campaign_id}")',
                 "statistics": [
@@ -162,7 +219,7 @@ def get_campaign_stats(campaign_id: str, campaign_name: str, retry_count: int = 
                     "bounced",
                     "delivered"
                 ],
-                "conversion_metric_id": "PLACEHOLDER"  # This may need to be updated
+                "conversion_metric_id": metric_id
             }
         }
     }
@@ -171,13 +228,13 @@ def get_campaign_stats(campaign_id: str, campaign_name: str, retry_count: int = 
 
     # Handle rate limiting with exponential backoff
     if response.status_code == 429:
-        if retry_count < 3:
-            wait_time = (retry_count + 1) * 2  # 2, 4, 6 seconds
+        if retry_count < 5:
+            wait_time = (retry_count + 1) * 5  # 5, 10, 15, 20, 25 seconds
             print(f"  Rate limited. Waiting {wait_time} seconds before retry...")
             time.sleep(wait_time)
-            return get_campaign_stats(campaign_id, campaign_name, retry_count + 1)
+            return get_campaign_stats(campaign_id, campaign_name, metric_id, retry_count + 1)
         else:
-            print(f"  Warning: Rate limit exceeded after 3 retries")
+            print(f"  Warning: Rate limit exceeded after 5 retries")
             return {
                 "recipients": 0,
                 "opens": 0,
@@ -192,6 +249,11 @@ def get_campaign_stats(campaign_id: str, campaign_name: str, retry_count: int = 
 
     if response.status_code != 200:
         print(f"  Warning: Could not fetch stats (status {response.status_code})")
+        try:
+            error_detail = response.json()
+            print(f"  Error details: {error_detail}")
+        except:
+            print(f"  Response text: {response.text[:200]}")
         return {
             "recipients": 0,
             "opens": 0,
@@ -318,23 +380,27 @@ def main():
     
     # Step 1: Get all campaigns with their messages
     campaigns = get_campaigns_with_messages()
-    
+
     if not campaigns:
         print("No campaigns found")
         return
-    
-    # Step 2: Get performance stats for each campaign
+
+    # Step 2: Fetch a valid metric ID (required for campaign stats API)
+    metric_id = get_metric_id()
+    print()
+
+    # Step 3: Get performance stats for each campaign
     print(f"\nFetching performance stats for {len(campaigns)} campaigns...")
     print("(This may take several minutes due to rate limiting...)")
     print()
 
     for i, campaign in enumerate(campaigns, 1):
         print(f"[{i}/{len(campaigns)}] ", end="")
-        stats = get_campaign_stats(campaign["campaign_id"], campaign["campaign_name"])
+        stats = get_campaign_stats(campaign["campaign_id"], campaign["campaign_name"], metric_id)
         campaign.update(stats)
         time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
-    
-    # Step 3: Export to CSV
+
+    # Step 4: Export to CSV
     print("\nExporting data...")
     export_to_csv(campaigns)
     

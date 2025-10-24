@@ -18,8 +18,16 @@ BASE_URL = "https://a.klaviyo.com/api"
 REVISION = "2024-10-15"
 
 # Export Settings
-MONTHS_BACK = 6  # How many months of campaigns to export
+MONTHS_BACK = 6  # How many months of campaigns to export (used for filtering campaigns)
 OUTPUT_FILENAME = "klaviyo_campaigns_export.csv"
 
+# Timeframe for Statistics
+# NOTE: The script uses "last_30_days" for fetching campaign statistics
+# Valid options: today, yesterday, this_week, last_7_days, last_week, this_month,
+#                last_30_days, last_month, last_90_days, last_3_months,
+#                last_365_days, last_12_months, this_year, last_year
+# The MONTHS_BACK setting above filters which campaigns to fetch, but statistics
+# are always pulled using the timeframe below (hardcoded as last_30_days in the script)
+
 # Rate Limiting
-RATE_LIMIT_DELAY = 0.5  # Delay between API calls in seconds (conservative to avoid 429 errors)
+RATE_LIMIT_DELAY = 1.0  # Delay between API calls in seconds (1 request/sec, increase if you still hit rate limits)
