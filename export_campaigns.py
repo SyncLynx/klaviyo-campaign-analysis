@@ -90,14 +90,15 @@ def get_campaigns_with_messages() -> List[Dict]:
     months_ago = datetime.now(timezone.utc) - timedelta(days=30 * MONTHS_BACK)
     
     campaigns_data = []
+    tag_names = {}  # Map tag IDs to tag names (collected across all pages)
     url = f"{BASE_URL}/campaigns/"
-    
-    # Filter for email campaigns and include campaign messages
+
+    # Filter for email campaigns and include campaign messages and tags
     params = {
         "filter": "equals(messages.channel,'email')",
-        "include": "campaign-messages"
+        "include": "campaign-messages,tags"
     }
-    
+
     while url:
         response = requests.get(url, headers=HEADERS, params=params if url == f"{BASE_URL}/campaigns/" else None)
         
@@ -120,22 +121,28 @@ def get_campaigns_with_messages() -> List[Dict]:
                 "subject": None,
                 "preview_text": None,
                 "from_email": None,
-                "from_label": None
+                "from_label": None,
+                "tag_ids": []
             }
-            
+
             # Get message ID from relationships
             if "relationships" in campaign and "campaign-messages" in campaign["relationships"]:
                 messages = campaign["relationships"]["campaign-messages"].get("data", [])
                 if messages:
                     campaign_info["message_id"] = messages[0]["id"]
-            
+
+            # Get tag IDs from relationships
+            if "relationships" in campaign and "tags" in campaign["relationships"]:
+                tags = campaign["relationships"]["tags"].get("data", [])
+                campaign_info["tag_ids"] = [tag["id"] for tag in tags]
+
             campaigns_data.append(campaign_info)
         
-        # Extract message details from included section
+        # Extract message details and tag names from included section
         for included_item in data.get("included", []):
             if included_item["type"] == "campaign-message":
                 message_id = included_item["id"]
-                
+
                 # Find the campaign this message belongs to
                 for campaign_info in campaigns_data:
                     if campaign_info["message_id"] == message_id:
@@ -145,13 +152,24 @@ def get_campaigns_with_messages() -> List[Dict]:
                         campaign_info["from_email"] = content.get("from_email", "")
                         campaign_info["from_label"] = content.get("from_label", "")
                         break
-        
+
+            elif included_item["type"] == "tag":
+                tag_id = included_item["id"]
+                tag_name = included_item["attributes"].get("name", "")
+                tag_names[tag_id] = tag_name
+
         # Check for next page
         url = data.get("links", {}).get("next")
         if url:
             params = None  # Don't send params for next page URL
             time.sleep(0.1)  # Rate limiting courtesy
-    
+
+    # Map tag IDs to tag names for all campaigns (after all pages are fetched)
+    for campaign_info in campaigns_data:
+        campaign_info["tags"] = ", ".join([tag_names.get(tag_id, tag_id) for tag_id in campaign_info.get("tag_ids", [])])
+        if "tag_ids" in campaign_info:
+            del campaign_info["tag_ids"]  # Remove tag IDs, keep only names
+
     # Filter to only campaigns from last X months with "sent" status
     print(f"Filtering for SENT campaigns after: {months_ago.strftime('%Y-%m-%d %H:%M:%S')}")
     filtered_campaigns = []
@@ -326,6 +344,7 @@ def export_to_csv(campaigns: List[Dict], filename: str = None):
         "from_label",
         "from_email",
         "preview_text",
+        "tags",
         "recipients",
         "delivered",
         "bounced",
@@ -352,6 +371,7 @@ def export_to_csv(campaigns: List[Dict], filename: str = None):
                 "from_label": campaign.get("from_label", ""),
                 "from_email": campaign.get("from_email", ""),
                 "preview_text": campaign.get("preview_text", ""),
+                "tags": campaign.get("tags", ""),
                 "recipients": campaign.get("recipients", 0),
                 "delivered": campaign.get("delivered", 0),
                 "bounced": campaign.get("bounced", 0),
